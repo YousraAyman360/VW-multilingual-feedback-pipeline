@@ -1,6 +1,6 @@
 # Multilingual Customer Feedback & Decision-Making Pipeline
 
-A prototype AI decision platform built to demonstrate automated ingestion, cross-market normalization, and prioritization of customer feedback for automotive operations (Volkswagen Group Case Study).
+A prototype AI decision platform built to demonstrate automated ingestion, cross-market normalization, and prioritization of customer feedback for automotive operations (Case Study inspired by Volkswagen).
 
 ---
 
