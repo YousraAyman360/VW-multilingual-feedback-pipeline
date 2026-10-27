@@ -123,7 +123,7 @@ if __name__ == "__main__":
 
     recommendations = prioritization_agent(all_aspects)
 
-    print("=== BMW GLOBAL DECISION PLATFORM: PROTOTYPE OUTPUT ===\n")
+    print("=== VW GLOBAL DECISION PLATFORM: PROTOTYPE OUTPUT ===\n")
     for rank, rec in enumerate(recommendations, start=1):
         print(f"Priority #{rank}: {rec.category} (Score: {rec.priority_score})")
         print(f" - Volume: {rec.total_mentions} feedback item(s) across {', '.join(rec.affected_markets)}")
