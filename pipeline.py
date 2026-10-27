@@ -5,7 +5,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 
 # =====================================================================
-# 1. Schemas & Volkswagen Group Taxonomy
+# 1. Schemas & Volkswagen Group Illustrative Taxonomy
 # =====================================================================
 
 TAXONOMY = [
