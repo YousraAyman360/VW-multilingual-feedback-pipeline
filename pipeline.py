@@ -1,12 +1,18 @@
-import json
+import os
 from dataclasses import dataclass
 from typing import List, Literal
+from openai import OpenAI
 from pydantic import BaseModel, Field
 
+# =====================================================================
+# 1. Schemas & Volkswagen Group Taxonomy
+# =====================================================================
+
 TAXONOMY = [
-    "INFOTAINMENT_SOFTWARE",
+    "INFOTAINMENT_MIB_SOFTWARE",
     "CLIMATE_HVAC",
     "CHASSIS_SUSPENSION",
+    "POWERTRAIN_MEB_BATTERY",
     "DEALER_SERVICE"
 ]
 
@@ -16,57 +22,68 @@ class FeedbackItem(BaseModel):
     raw_text: str
 
 class ExtractedAspect(BaseModel):
-    review_id: str
-    region: str
-    category: str
-    sentiment: float = Field(ge=-1.0, le=1.0)
-    safety_risk: bool
-    summary: str
+    category: Literal[
+        "INFOTAINMENT_MIB_SOFTWARE",
+        "CLIMATE_HVAC",
+        "CHASSIS_SUSPENSION",
+        "POWERTRAIN_MEB_BATTERY",
+        "DEALER_SERVICE"
+    ] = Field(description="Must match Volkswagen global component taxonomy.")
+    sentiment: float = Field(
+        ge=-1.0, 
+        le=1.0, 
+        description="-1.0 (severe failure/defect) to +1.0 (delight/praise)."
+    )
+    safety_risk: bool = Field(
+        description="True if involves braking, steering, battery thermal, or ADAS/airbag faults."
+    )
+    summary: str = Field(description="Brief English summary of the issue.")
 
-def analyze_review_agent(review: FeedbackItem) -> List[ExtractedAspect]:
-    results = {
-        "REV-01": [
-            ExtractedAspect(
-                review_id="REV-01",
-                region="Middle East",
-                category="INFOTAINMENT_SOFTWARE",
-                sentiment=-0.8,
-                safety_risk=False,
-                summary="Screen freezes and disconnects Apple CarPlay"
-            )
-        ],
-        "REV-02": [
-            ExtractedAspect(
-                review_id="REV-02",
-                region="Middle East",
-                category="CLIMATE_HVAC",
-                sentiment=-0.9,
-                safety_risk=False,
-                summary="AC takes too long to cool cabin in 45°C heat"
-            )
-        ],
-        "REV-03": [
-            ExtractedAspect(
-                review_id="REV-03",
-                region="North America",
-                category="INFOTAINMENT_SOFTWARE",
-                sentiment=-0.7,
-                safety_risk=False,
-                summary="iDrive screen lags and reboots randomly"
-            )
-        ],
-        "REV-04": [
-            ExtractedAspect(
-                review_id="REV-04",
-                region="North America",
-                category="CHASSIS_SUSPENSION",
-                sentiment=-0.6,
-                safety_risk=True,
-                summary="Vibration through pedal during high-speed braking"
-            )
-        ]
-    }
-    return results.get(review.id, [])
+class LLMExtractionResponse(BaseModel):
+    aspects: List[ExtractedAspect]
+
+# =====================================================================
+# 2. Volkswagen Quality AI Agent Call
+# =====================================================================
+
+client = OpenAI()
+
+SYSTEM_PROMPT = f"""
+You are an expert Automotive Quality AI Engineer at Volkswagen Group.
+Your task is to analyze incoming customer feedback across all markets in any language 
+(including Modern Standard Arabic, regional Arabic dialects, German, and English).
+
+For each issue or theme found in the review:
+1. Map the component to Volkswagen's official taxonomy: {TAXONOMY}.
+2. Assign a sentiment score from -1.0 to +1.0.
+3. Determine if the issue presents an immediate or potential vehicle safety risk.
+4. Provide a concise English summary.
+
+If the customer mentions multiple separate issues, extract each as a distinct aspect.
+"""
+
+def analyze_review_with_llm(review: FeedbackItem) -> List[ExtractedAspect]:
+    """
+    Calls OpenAI using Structured Outputs to parse multilingual customer text into VW taxonomy.
+    """
+    try:
+        completion = client.beta.chat.completions.parse(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Market Region: {review.region}\nRaw Customer Feedback: {review.raw_text}"}
+            ],
+            response_format=LLMExtractionResponse,
+            temperature=0.0
+        )
+        return completion.choices[0].message.parsed.aspects
+    except Exception as e:
+        print(f"Error calling LLM for {review.id}: {e}")
+        return []
+
+# =====================================================================
+# 3. Prioritization & Action Routing
+# =====================================================================
 
 @dataclass
 class RankedRecommendation:
@@ -76,28 +93,32 @@ class RankedRecommendation:
     priority_score: float
     recommended_action: str
 
-def prioritization_agent(extracted_aspects: List[ExtractedAspect]) -> List[RankedRecommendation]:
+def prioritization_agent(
+    feedback_aspect_pairs: List[tuple[FeedbackItem, ExtractedAspect]]
+) -> List[RankedRecommendation]:
     grouped = {}
-    for asp in extracted_aspects:
-        grouped.setdefault(asp.category, []).append(asp)
+    for review, aspect in feedback_aspect_pairs:
+        grouped.setdefault(aspect.category, []).append((review, aspect))
 
     ranked_list = []
     for cat, items in grouped.items():
         count = len(items)
-        neg_sentiment_sum = sum(abs(x.sentiment) for x in items if x.sentiment < 0)
-        safety_multiplier = 3.0 if any(x.safety_risk for x in items) else 1.0
-        markets = list(set(x.region for x in items))
+        neg_sentiment_sum = sum(abs(asp.sentiment) for _, asp in items if asp.sentiment < 0)
+        safety_multiplier = 3.0 if any(asp.safety_risk for _, asp in items) else 1.0
+        markets = list(set(rev.region for rev, _ in items))
 
+        # Scoring Formula: (Volume + Severity) * Safety Multiplier
         score = round((count + neg_sentiment_sum) * safety_multiplier, 2)
 
-        if cat == "INFOTAINMENT_SOFTWARE":
-            action = "Deploy Over-The-Air (OTA) patch for head-unit stability."
+        # Operational decision routing tailored to Volkswagen operations
+        if cat == "INFOTAINMENT_MIB_SOFTWARE":
+            action = "Deploy Over-The-Air (OTA) update for MIB / ID.Software digital cockpit stability."
         elif cat == "CHASSIS_SUSPENSION":
-            action = "Issue Dealer Technical Bulletin (TSB) for brake inspection."
+            action = "Issue Dealer Technical Bulletin (TSB) for mechanical/braking inspection."
         elif cat == "CLIMATE_HVAC":
-            action = "Calibrate blower airflow curves for hot-climate markets (GCC)."
+            action = "Recalibrate Climatronic thermal curves for hot-climate export regions (e.g. GCC)."
         else:
-            action = "Forward to regional quality assurance."
+            action = "Forward diagnostic report to regional VW Quality Assurance."
 
         ranked_list.append(RankedRecommendation(
             category=cat,
@@ -109,22 +130,55 @@ def prioritization_agent(extracted_aspects: List[ExtractedAspect]) -> List[Ranke
 
     return sorted(ranked_list, key=lambda r: r.priority_score, reverse=True)
 
+# =====================================================================
+# 4. Pipeline Execution
+# =====================================================================
+
 if __name__ == "__main__":
+    if not os.getenv("OPENAI_API_KEY"):
+        print("Please set your OPENAI_API_KEY environment variable to run live calls.")
+        exit(1)
+
+    # Real-world test examples including Arabic dialects and VW-specific terms
     dataset = [
-        FeedbackItem(id="REV-01", region="Middle East", raw_text="الشاشة تعلق وتفصل أبل كاربلاي فجأة وأنا أسوق"),
-        FeedbackItem(id="REV-02", region="Middle East", raw_text="المكيف جداً ضعيف في الظهر ويأخذ نص ساعة ليبرد"),
-        FeedbackItem(id="REV-03", region="North America", raw_text="iDrive 8.5 display lags heavily and resets on startup"),
-        FeedbackItem(id="REV-04", region="North America", raw_text="Severe brake pedal shudder when stopping from 70mph"),
+        FeedbackItem(
+            id="REV-01", 
+            region="Middle East", 
+            raw_text="شاشة الميديا بتعلق كتير والوايرلس كاربلاي بيفصل كل شوية وأنا سايق على الطريق"
+        ),
+        FeedbackItem(
+            id="REV-02", 
+            region="Middle East", 
+            raw_text="تكييف الكليماترونيك ضعيف جدا في الصيف ودرجة الحرارة برا 45، العربية بتاخد نص ساعة عشان تبرد"
+        ),
+        FeedbackItem(
+            id="REV-03", 
+            region="North America", 
+            raw_text="The MIB3 infotainment screen went completely black and restarted during highway navigation."
+        ),
+        FeedbackItem(
+            id="REV-04", 
+            region="North America", 
+            raw_text="Violent brake pedal vibration and pulsing when slowing down from freeway speeds."
+        ),
     ]
 
-    all_aspects = []
+    print("Running live LLM extraction across multilingual dataset...\n")
+    processed_aspects = []
+    
     for review in dataset:
-        all_aspects.extend(analyze_review_agent(review))
+        aspects = analyze_review_with_llm(review)
+        for asp in aspects:
+            print(f"[{review.id} | {review.region}] -> Category: {asp.category} | Sentiment: {asp.sentiment} | Safety Risk: {asp.safety_risk}")
+            print(f"   Summary: {asp.summary}\n")
+            processed_aspects.append((review, asp))
 
-    recommendations = prioritization_agent(all_aspects)
+    recommendations = prioritization_agent(processed_aspects)
 
-    print("=== VW GLOBAL DECISION PLATFORM: PROTOTYPE OUTPUT ===\n")
+    print("=" * 65)
+    print("=== VOLKSWAGEN GROUP DECISION PLATFORM: EXECUTIVE REPORT ===")
+    print("=" * 65 + "\n")
     for rank, rec in enumerate(recommendations, start=1):
         print(f"Priority #{rank}: {rec.category} (Score: {rec.priority_score})")
-        print(f" - Volume: {rec.total_mentions} feedback item(s) across {', '.join(rec.affected_markets)}")
+        print(f" - Volume: {rec.total_mentions} review(s) across {', '.join(rec.affected_markets)}")
         print(f" - Recommended Action: {rec.recommended_action}\n")
